@@ -7,6 +7,8 @@ pub struct AIList<T> {
     labels: Vec<T>,
     /// List of starts of sublists
     headers: Vec<Header>,
+    /// The max number of items to just do a linear search on
+    max_lin_search: usize,
 }
 
 /// Hold the start and stop of each sublist
@@ -25,8 +27,13 @@ struct Header {
 
 impl<T: Clone> AIList<T> {
     /// Create a new AIList out of the passed in intervals. the `min_cov_len`
-    pub fn new(mut intervals_labels: Vec<(Interval, T)>, min_cov_len: Option<usize>) -> Self {
+    pub fn new(
+        mut intervals_labels: Vec<(Interval, T)>,
+        min_cov_len: Option<usize>,
+        max_lin_search: Option<usize>,
+    ) -> Self {
         let min_cov_len = min_cov_len.unwrap_or(20);
+        let max_lin_search = max_lin_search.unwrap_or(15);
         intervals_labels.sort_by(|a, b| a.0.cmp(&b.0)); // sort by start site
 
         let mut headers = vec![];
@@ -49,6 +56,7 @@ impl<T: Clone> AIList<T> {
             intervals,
             labels,
             headers,
+            max_lin_search,
         }
     }
 
@@ -69,7 +77,6 @@ impl<T: Clone> AIList<T> {
                 }
             }
             // check if list[i] covers more than the min coverage
-            // TODO: make the clones go away
             if covered > min_cov_len {
                 list_2.push(list[i].clone());
             } else {
@@ -94,30 +101,49 @@ impl<T: Clone> AIList<T> {
     }
 
     /// Binary search to find the right most index where interval.start < query.stop
-    /// TODO: test this
     #[inline]
-    pub fn upper_bound(stop: u32, intervals: &[Interval]) -> usize {
-        let mut size = intervals.len();
-        let mut high = size;
-        while size > 0 {
-            let half = size / 2;
-            let other_half = size - half;
-            let probe = high - half;
-            let other_high = high - other_half;
-            let v = &intervals[probe];
-            size = half;
-            high = if v.start >= stop { other_high } else { high }
+    pub fn upper_bound(stop: u32, intervals: &[Interval]) -> Option<usize> {
+        let mut right = match intervals.len().checked_sub(1) {
+            Some(n) => n,
+            None => {
+                return None;
+            }
+        };
+        let mut left = 0;
+        if intervals[right].start < stop {
+            // last start pos is less than the stop, then return the last pos
+            return Some(right);
+        } else if intervals[left].start >= stop {
+            // first start pos > stop, not in this cluster at all
+            return None;
         }
-        high
+
+        while left < right - 1 {
+            let mid = (left + right) / 2;
+            if intervals[mid].start >= stop {
+                right = mid - 1;
+            } else {
+                left = mid;
+            }
+        }
+
+        if intervals[right].start < stop {
+            Some(right)
+        } else if intervals[left].start < stop {
+            Some(left)
+        } else {
+            None
+        }
     }
 
     #[inline]
-    fn find(&self, start: u32, stop: u32) -> IterFind<T> {
+    pub fn find(&self, start: u32, stop: u32) -> IterFind<T> {
         IterFind {
             inner: self,
-            off: Self::upper_bound(stop, &self.intervals[..self.headers[0].stop]),
+            off: 0,
             header_offset: 0,
             previous_header: 0,
+            skip_search: false,
             start,
             stop,
         }
@@ -131,6 +157,7 @@ pub struct IterFind<'a, T> {
     off: usize,
     header_offset: usize,
     previous_header: usize,
+    skip_search: bool,
     start: u32,
     stop: u32,
 }
@@ -140,49 +167,51 @@ impl<'a, T: Clone> Iterator for IterFind<'a, T> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        println!("Query: {}, {}", self.start, self.stop);
-        println!("Values: {:#?}", self.inner.intervals);
-        println!("Current Offset: {}", self.off);
-        println!("{:#?}", self.inner.headers);
-        for header_index in self.header_offset..self.inner.headers.len() {
-            let header = &self.inner.headers[header_index];
-            println!("Header: {:#?}", header);
-            self.header_offset = header_index;
-            //if self.off < header.start || self.off >= header.stop {
-            // Check if we've completed a loop, or just re-entered the iterator
-            if self.header_offset != self.previous_header {
-                println!("Recalculating offset for new cluster");
-                self.off = AIList::<T>::upper_bound(
-                    self.stop,
-                    &self.inner.intervals[header.start..header.stop],
-                );
-                self.previous_header = self.header_offset;
-            }
-
-            while self.off >= header.start && self.inner.intervals[self.off].max_end > self.start {
-                let result;
-                if self.inner.intervals[self.off].stop > self.start {
-                    result = Some((
-                        &self.inner.intervals[self.off],
-                        &self.inner.labels[self.off],
-                    ));
+        for h_idx in self.header_offset..self.inner.headers.len() {
+            self.header_offset = h_idx;
+            let header = &self.inner.headers[h_idx];
+            if header.stop - header.start > self.inner.max_lin_search {
+                let mut offset = if self.skip_search {
+                    match self.off.checked_sub(1) {
+                        Some(n) => n,
+                        None => break, // we've gone past the end of the list, get out
+                    }
                 } else {
-                    result = None;
-                }
-                let mut getout = false;
-                //self.off -= 1;
-                self.off = match self.off.checked_sub(1) {
-                    Some(val) => val,
-                    None => {
-                        getout = true;
-                        0
+                    match AIList::<T>::upper_bound(
+                        self.stop,
+                        &self.inner.intervals[header.start..header.stop],
+                    ) {
+                        Some(n) => n + header.start,
+                        None => continue, // Nothing in this chunk, jump to next chunk
                     }
                 };
-                if result.is_some() {
-                    return result;
+                while offset >= header.start && self.inner.intervals[offset].max_end > self.start {
+                    if self.inner.intervals[offset].stop > self.start {
+                        self.off = offset;
+                        self.skip_search = true;
+                        return Some((&self.inner.intervals[offset], &self.inner.labels[offset]));
+                    }
+                    self.skip_search = false;
+                    offset = match offset.checked_sub(1) {
+                        Some(n) => n,
+                        None => break,
+                    }
                 }
-                if getout {
-                    break;
+            } else {
+                let start = if self.skip_search {
+                    self.off
+                } else {
+                    header.start
+                };
+                for offset in start..header.stop {
+                    if self.inner.intervals[offset].start < self.stop
+                        && self.inner.intervals[offset].stop > self.start
+                    {
+                        self.skip_search = true;
+                        self.off = offset + 1;
+                        return Some((&self.inner.intervals[offset], &self.inner.labels[offset]));
+                    }
+                    self.skip_search = false;
                 }
             }
         }
@@ -263,7 +292,7 @@ mod tests {
                 max_end: 0,
             }, 0))
             .collect();
-        let ailist= AIList::new(data, Some(3));
+        let ailist= AIList::new(data, Some(3), Some(5));
        ailist 
     }
     fn setup_overlapping() -> AIList<u32> {
@@ -275,7 +304,7 @@ mod tests {
                 max_end: 0,
             }, 0))
             .collect();
-        let ailist= AIList::new(data, Some(3));
+        let ailist= AIList::new(data, Some(3), Some(5));
        ailist 
     }
     fn setup_badlapper() -> AIList<u32> {
@@ -291,7 +320,7 @@ mod tests {
             (Iv{start: 68, stop: 71, max_end: 0}, 0), // overlap start
             (Iv{start: 70, stop: 75, max_end: 0}, 0),
         ];
-        let ailist= AIList::new(data, Some(3));
+        let ailist= AIList::new(data, Some(3), Some(5));
        ailist 
     }
     fn setup_single() -> AIList<u32> {
@@ -300,7 +329,7 @@ mod tests {
             stop: 35,
             max_end: 0,
         }, 0)];
-        let ailist= AIList::new(data, Some(3));
+        let ailist= AIList::new(data, Some(3), Some(5));
        ailist 
     }
 
@@ -392,7 +421,9 @@ mod tests {
             stop: 25,
             max_end: 0,
         }, &0);
-        assert_eq!(vec![e1, e2], lapper.find(8, 20).collect::<Vec<(&Iv,&u32)>>());
+        let mut found = lapper.find(8, 20).collect::<Vec<(&Iv,&u32)>>();
+        found.sort_by(|a, b| a.0.start.cmp(&b.0.start));
+        assert_eq!(vec![e1, e2], found);
         //assert_eq!(
             //vec![&e1, &e2],
             //lapper.seek(8, 20, &mut cursor).collect::<Vec<&Iv>>()
