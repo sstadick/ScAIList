@@ -6,7 +6,7 @@ pub struct AIList<T> {
     /// The labels that map to each interval
     labels: Vec<T>,
     /// List of starts of sublists
-    header: Vec<usize>,
+    headers: Vec<Header>,
 }
 
 /// Hold the start and stop of each sublist
@@ -17,28 +17,38 @@ pub struct Interval {
     pub max_end: u32,
 }
 
-impl<T: Clone> AIList<T = Clone> {
+#[derive(Debug)]
+struct Header {
+    start: usize,
+    stop: usize,
+}
+
+impl<T: Clone> AIList<T> {
     /// Create a new AIList out of the passed in intervals. the `min_cov_len`
     pub fn new(mut intervals_labels: Vec<(Interval, T)>, min_cov_len: Option<usize>) -> Self {
         let min_cov_len = min_cov_len.unwrap_or(20);
         intervals_labels.sort_by(|a, b| a.0.cmp(&b.0)); // sort by start site
 
-        let mut header = vec![0];
+        let mut headers = vec![];
         let mut intervals = Vec::with_capacity(intervals_labels.len());
         // Decompose long intervals
+        let mut header_start = 0;
         while intervals_labels.len() > 0 {
             let (list_1, list_2) = Self::decompose(intervals_labels, min_cov_len);
             intervals.extend(list_1);
-            header.push(intervals.len());
+            headers.push(Header {
+                start: header_start,
+                stop: intervals.len(),
+            });
+            header_start = intervals.len();
             intervals_labels = list_2;
         }
 
-        // Set the max stop on all intervals
         let (intervals, labels): (Vec<Interval>, Vec<T>) = intervals.into_iter().unzip();
         AIList {
             intervals,
             labels,
-            header,
+            headers,
         }
     }
 
@@ -53,7 +63,7 @@ impl<T: Clone> AIList<T = Clone> {
         for i in 0..list.len() {
             let interval = list[i].0;
             let mut covered = 0;
-            for j in i..std::cmp::max(i + (2 * min_cov_len), list.len()) {
+            for j in i..std::cmp::min(i + (2 * min_cov_len), list.len()) {
                 if interval.overlap(list[j].0.start, list[j].0.stop) {
                     covered += 1;
                 }
@@ -79,14 +89,14 @@ impl<T: Clone> AIList<T = Clone> {
             if iv.stop >= max_stop {
                 max_stop = iv.stop;
             }
-            iv.stop = max_stop;
+            iv.max_end = max_stop;
         }
     }
 
     /// Binary search to find the right most index where interval.start < query.stop
     /// TODO: test this
     #[inline]
-    fn upper_bound(stop: u32, intervals: &[Interval]) -> usize {
+    pub fn upper_bound(stop: u32, intervals: &[Interval]) -> usize {
         let mut size = intervals.len();
         let mut high = size;
         while size > 0 {
@@ -105,12 +115,9 @@ impl<T: Clone> AIList<T = Clone> {
     fn find(&self, start: u32, stop: u32) -> IterFind<T> {
         IterFind {
             inner: self,
-            off: Self::lower_bound(
-                stop,
-                &self.intervals[..self.header.get(1).unwrap_or(self.intervals.len())],
-            ),
+            off: Self::upper_bound(stop, &self.intervals[..self.headers[0].stop]),
             header_offset: 0,
-            end: self.intervals.len(),
+            previous_header: 0,
             start,
             stop,
         }
@@ -123,38 +130,66 @@ pub struct IterFind<'a, T> {
     inner: &'a AIList<T>,
     off: usize,
     header_offset: usize,
-    end: usize,
+    previous_header: usize,
     start: u32,
     stop: u32,
 }
 
-impl<'a, T> Iterator for IterFind<'a, T> {
-    type Item = &'a IntervalNode<T>;
+impl<'a, T: Clone> Iterator for IterFind<'a, T> {
+    type Item = (&'a Interval, &'a T);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(h) = self.inner.header.get(self.header_offset) {
-            self.off = AIList::upper_bound(
-                self.stop,
-                &self.inner.intervals[h..self
-                    .header
-                    .get(self.header_offset + 1)
-                    .unwrap_or(self.inner.intervals.len())],
-            );
-            // TODO: Stopped here, not sure this is the best way to iterate
-        }
-        while self.off < self.inner.intervals.len() {
-            let interval = &self.inner.intervals[self.off];
-            self.off += 1;
-            if interval.overlap(self.start, self.stop) {
-                return self.inner.interval_nodes.get(self.off - 1);
-            } else if interval.start >= self.stop {
-                break;
+        println!("Query: {}, {}", self.start, self.stop);
+        println!("Values: {:#?}", self.inner.intervals);
+        println!("Current Offset: {}", self.off);
+        println!("{:#?}", self.inner.headers);
+        for header_index in self.header_offset..self.inner.headers.len() {
+            let header = &self.inner.headers[header_index];
+            println!("Header: {:#?}", header);
+            self.header_offset = header_index;
+            //if self.off < header.start || self.off >= header.stop {
+            // Check if we've completed a loop, or just re-entered the iterator
+            if self.header_offset != self.previous_header {
+                println!("Recalculating offset for new cluster");
+                self.off = AIList::<T>::upper_bound(
+                    self.stop,
+                    &self.inner.intervals[header.start..header.stop],
+                );
+                self.previous_header = self.header_offset;
+            }
+
+            while self.off >= header.start && self.inner.intervals[self.off].max_end > self.start {
+                let result;
+                if self.inner.intervals[self.off].stop > self.start {
+                    result = Some((
+                        &self.inner.intervals[self.off],
+                        &self.inner.labels[self.off],
+                    ));
+                } else {
+                    result = None;
+                }
+                let mut getout = false;
+                //self.off -= 1;
+                self.off = match self.off.checked_sub(1) {
+                    Some(val) => val,
+                    None => {
+                        getout = true;
+                        0
+                    }
+                };
+                if result.is_some() {
+                    return result;
+                }
+                if getout {
+                    break;
+                }
             }
         }
         None
     }
 }
+
 impl Interval {
     /// Create a new interval with default max_end
     pub fn new(start: u32, stop: u32) -> Self {
@@ -214,9 +249,153 @@ impl PartialEq for Interval {
 }
 
 #[cfg(test)]
+#[rustfmt::skip]
 mod tests {
+    use super::*;
+
+    type Iv = Interval;
+    fn setup_nonoverlapping() -> AIList<u32> {
+        let data: Vec<(Iv, u32)> = (0..100)
+            .step_by(20)
+            .map(|x| (Iv {
+                start: x,
+                stop: x + 10,
+                max_end: 0,
+            }, 0))
+            .collect();
+        let ailist= AIList::new(data, Some(3));
+       ailist 
+    }
+    fn setup_overlapping() -> AIList<u32> {
+        let data: Vec<(Iv, u32)> = (0..100)
+            .step_by(10)
+            .map(|x| (Iv {
+                start: x,
+                stop: x + 15,
+                max_end: 0,
+            }, 0))
+            .collect();
+        let ailist= AIList::new(data, Some(3));
+       ailist 
+    }
+    fn setup_badlapper() -> AIList<u32> {
+        let data: Vec<(Iv, u32)> = vec![
+            (Iv{start: 70, stop: 120, max_end: 0}, 0), // max_len = 50
+            (Iv{start: 10, stop: 15, max_end: 0}, 0),
+            (Iv{start: 10, stop: 15, max_end: 0}, 0), // exact overlap
+            (Iv{start: 12, stop: 15, max_end: 0}, 0), // inner overlap
+            (Iv{start: 14, stop: 16, max_end: 0}, 0), // overlap end
+            (Iv{start: 40, stop: 45, max_end: 0}, 0),
+            (Iv{start: 50, stop: 55, max_end: 0}, 0),
+            (Iv{start: 60, stop: 65, max_end: 0}, 0),
+            (Iv{start: 68, stop: 71, max_end: 0}, 0), // overlap start
+            (Iv{start: 70, stop: 75, max_end: 0}, 0),
+        ];
+        let ailist= AIList::new(data, Some(3));
+       ailist 
+    }
+    fn setup_single() -> AIList<u32> {
+        let data: Vec<(Iv, u32)> = vec![(Iv {
+            start: 10,
+            stop: 35,
+            max_end: 0,
+        }, 0)];
+        let ailist= AIList::new(data, Some(3));
+       ailist 
+    }
+
+    // Test that a query stop that hits an interval start returns no interval
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn test_query_stop_interval_start() {
+        let lapper = setup_nonoverlapping();
+        //let mut cursor = 0;
+        assert_eq!(None, lapper.find(15, 20).next());
+        //assert_eq!(None, lapper.seek(15, 20, &mut cursor).next())
+    }
+
+    // Test that a query start that hits an interval end returns no interval
+    #[test]
+    fn test_query_start_interval_stop() {
+        let lapper = setup_nonoverlapping();
+        //let mut cursor = 0;
+        assert_eq!(None, lapper.find(30, 35).next());
+        //assert_eq!(None, lapper.seek(30, 35, &mut cursor).next())
+    }
+
+    // Test that a query that overlaps the start of an interval returns that interval
+    #[test]
+    fn test_query_overlaps_interval_start() {
+        let lapper = setup_nonoverlapping();
+        //let mut cursor = 0;
+        let expected = (&Iv {
+            start: 20,
+            stop: 30,
+            max_end: 0,
+        }, &0);
+        assert_eq!(Some(expected), lapper.find(15, 25).next());
+        //assert_eq!(Some(&expected), lapper.seek(15, 25, &mut cursor).next())
+    }
+
+    // Test that a query that overlaps the stop of an interval returns that interval
+    #[test]
+    fn test_query_overlaps_interval_stop() {
+        let lapper = setup_nonoverlapping();
+        //let mut cursor = 0;
+        let expected = (&Iv {
+            start: 20,
+            stop: 30,
+            max_end: 0,
+        }, &0);
+        assert_eq!(Some(expected), lapper.find(25, 35).next());
+        //assert_eq!(Some(&expected), lapper.seek(25, 35, &mut cursor).next())
+    }
+
+    // Test that a query that is enveloped by interval returns interval
+    #[test]
+    fn test_interval_envelops_query() {
+        let lapper = setup_nonoverlapping();
+        //let mut cursor = 0;
+        let expected = (&Iv {
+            start: 20,
+            stop: 30,
+            max_end: 0,
+        }, &0);
+        assert_eq!(Some(expected), lapper.find(22, 27).next());
+        //assert_eq!(Some(&expected), lapper.seek(22, 27, &mut cursor).next())
+    }
+
+    // Test that a query that envolops an interval returns that interval
+    #[test]
+    fn test_query_envolops_interval() {
+        let lapper = setup_nonoverlapping();
+        //let mut cursor = 0;
+        let expected = (&Iv {
+            start: 20,
+            stop: 30,
+            max_end: 0,
+        }, &0);
+        assert_eq!(Some(expected), lapper.find(15, 35).next());
+        //assert_eq!(Some(&expected), lapper.seek(15, 35, &mut cursor).next())
+    }
+
+    #[test]
+    fn test_overlapping_intervals() {
+        let lapper = setup_overlapping();
+        //let mut cursor = 0;
+        let e1 = (&Iv {
+            start: 0,
+            stop: 15,
+            max_end: 0,
+        }, &0);
+        let e2 = (&Iv {
+            start: 10,
+            stop: 25,
+            max_end: 0,
+        }, &0);
+        assert_eq!(vec![e1, e2], lapper.find(8, 20).collect::<Vec<(&Iv,&u32)>>());
+        //assert_eq!(
+            //vec![&e1, &e2],
+            //lapper.seek(8, 20, &mut cursor).collect::<Vec<&Iv>>()
+        //);
     }
 }
