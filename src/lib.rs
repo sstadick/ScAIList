@@ -1,4 +1,4 @@
-use std::cmp::Ordering::{self};
+use std::cmp::Ordering::{self, Equal, Greater, Less};
 #[derive(Debug)]
 pub struct AIList<T> {
     /// The list of intervals
@@ -25,7 +25,7 @@ struct Header {
     stop: usize,
 }
 
-impl<T: Clone> AIList<T> {
+impl<T: Clone + std::fmt::Debug> AIList<T> {
     /// Create a new AIList out of the passed in intervals. the `min_cov_len`
     pub fn new(
         mut intervals_labels: Vec<(Interval, T)>,
@@ -103,28 +103,23 @@ impl<T: Clone> AIList<T> {
     /// Binary search to find the right most index where interval.start < query.stop
     #[inline]
     pub fn upper_bound(stop: u32, intervals: &[Interval]) -> Option<usize> {
-        let mut right = match intervals.len().checked_sub(1) {
-            Some(n) => n,
-            None => {
-                return None;
-            }
-        };
+        let mut right = intervals.len();
         let mut left = 0;
-        if intervals[right].start < stop {
+        let mut mid = right / 2;
+
+        if intervals[right - 1].start < stop {
             // last start pos is less than the stop, then return the last pos
             return Some(right);
         } else if intervals[left].start >= stop {
             // first start pos > stop, not in this cluster at all
             return None;
         }
-
-        while left < right - 1 {
-            let mid = (left + right) / 2;
-            if intervals[mid].start >= stop {
-                right = mid - 1;
-            } else {
-                left = mid;
-            }
+        while left < right {
+            match stop.cmp(&intervals[mid].start) {
+                Less => right = mid - 1,
+                Equal | Greater => left = mid + 1,
+            };
+            mid = (right + left) / 2;
         }
 
         if intervals[right].start < stop {
@@ -137,85 +132,89 @@ impl<T: Clone> AIList<T> {
     }
 
     #[inline]
-    pub fn find(&self, start: u32, stop: u32) -> IterFind<T> {
-        IterFind {
+    pub fn iter(&self) -> IterAIList<T> {
+        IterAIList {
             inner: self,
-            off: 0,
-            header_offset: 0,
-            previous_header: 0,
-            skip_search: false,
-            start,
-            stop,
+            pos: 0,
         }
     }
-}
-
-/// Find Iterator
-#[derive(Debug)]
-pub struct IterFind<'a, T> {
-    inner: &'a AIList<T>,
-    off: usize,
-    header_offset: usize,
-    previous_header: usize,
-    skip_search: bool,
-    start: u32,
-    stop: u32,
-}
-
-impl<'a, T: Clone> Iterator for IterFind<'a, T> {
-    type Item = (&'a Interval, &'a T);
 
     #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        for h_idx in self.header_offset..self.inner.headers.len() {
-            self.header_offset = h_idx;
-            let header = &self.inner.headers[h_idx];
-            if header.stop - header.start > self.inner.max_lin_search {
-                let mut offset = if self.skip_search {
-                    match self.off.checked_sub(1) {
+    pub fn find(&self, start: u32, stop: u32) -> IterFind<T> {
+        let mut result = vec![];
+        for h_idx in 0..self.headers.len() {
+            let header = &self.headers[h_idx];
+            if header.stop - header.start > 15 {
+                let mut offset =
+                    match Self::upper_bound(stop, &self.intervals[header.start..header.stop]) {
                         Some(n) => n,
-                        None => break, // we've gone past the end of the list, get out
+                        None => continue,
+                    };
+                while offset >= header.start && self.intervals[offset].max_end > start {
+                    if self.intervals[offset].stop > start {
+                        result.push((&self.intervals[offset], &self.labels[offset]));
                     }
-                } else {
-                    match AIList::<T>::upper_bound(
-                        self.stop,
-                        &self.inner.intervals[header.start..header.stop],
-                    ) {
-                        Some(n) => n + header.start,
-                        None => continue, // Nothing in this chunk, jump to next chunk
-                    }
-                };
-                while offset >= header.start && self.inner.intervals[offset].max_end > self.start {
-                    if self.inner.intervals[offset].stop > self.start {
-                        self.off = offset;
-                        self.skip_search = true;
-                        return Some((&self.inner.intervals[offset], &self.inner.labels[offset]));
-                    }
-                    self.skip_search = false;
                     offset = match offset.checked_sub(1) {
                         Some(n) => n,
                         None => break,
                     }
                 }
             } else {
-                let start = if self.skip_search {
-                    self.off
-                } else {
-                    header.start
-                };
-                for offset in start..header.stop {
-                    if self.inner.intervals[offset].start < self.stop
-                        && self.inner.intervals[offset].stop > self.start
-                    {
-                        self.skip_search = true;
-                        self.off = offset + 1;
-                        return Some((&self.inner.intervals[offset], &self.inner.labels[offset]));
+                for offset in header.start..header.stop {
+                    if self.intervals[offset].start < stop && self.intervals[offset].stop > start {
+                        result.push((&self.intervals[offset], &self.labels[offset]));
                     }
-                    self.skip_search = false;
                 }
             }
         }
-        None
+        // Gather a list of starting points for each header
+        IterFind { curr: 0, result }
+    }
+}
+
+/// Find Iterator
+#[derive(Debug)]
+pub struct IterFind<'a, T> {
+    curr: usize,
+    result: Vec<(&'a Interval, &'a T)>,
+}
+
+impl<'a, T: Clone + std::fmt::Debug> Iterator for IterFind<'a, T> {
+    type Item = (&'a Interval, &'a T);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr < self.result.len() {
+            self.curr += 1;
+            return Some(self.result[self.curr - 1]);
+        } else {
+            return None;
+        }
+    }
+}
+
+/// AIList Iterator
+pub struct IterAIList<'a, T>
+where
+    T: Clone + std::fmt::Debug + 'a,
+{
+    inner: &'a AIList<T>,
+    pos: usize,
+}
+
+impl<'a, T: Clone + std::fmt::Debug> Iterator for IterAIList<'a, T> {
+    type Item = (&'a Interval, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.inner.intervals.len() {
+            None
+        } else {
+            self.pos += 1;
+            Some((
+                &self.inner.intervals[self.pos - 1],
+                &self.inner.labels[self.pos - 1],
+            ))
+        }
     }
 }
 
@@ -304,7 +303,7 @@ mod tests {
                 max_end: 0,
             }, 0))
             .collect();
-        let ailist= AIList::new(data, Some(3), Some(5));
+        let ailist= AIList::new(data, Some(1), Some(5));
        ailist 
     }
     fn setup_badlapper() -> AIList<u32> {
