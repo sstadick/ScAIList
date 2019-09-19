@@ -71,11 +71,19 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
         for i in 0..list.len() {
             let interval = list[i].0;
             let mut covered = 0;
-            for j in i..std::cmp::min(i + (2 * min_cov_len), list.len()) {
-                if interval.overlap(list[j].0.start, list[j].0.stop) {
+            let mut j = i;
+            let j_end = std::cmp::min(i + (2 * min_cov_len), list.len());
+            while j < j_end && interval.stop < list[j].0.start {
+                if interval.start < list[j].0.stop {
                     covered += 1;
                 }
+                j += 1;
             }
+            //for j in i..std::cmp::min(i + (2 * min_cov_len), list.len()) {
+            //if interval.overlap(list[j].0.start, list[j].0.stop) {
+            //covered += 1;
+            //}
+            //}
             // check if list[i] covers more than the min coverage
             if covered > min_cov_len {
                 list_2.push(list[i].clone());
@@ -103,9 +111,8 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
     /// Binary search to find the right most index where interval.start < query.stop
     #[inline]
     pub fn upper_bound(stop: u32, intervals: &[Interval]) -> Option<usize> {
-        let mut right = intervals.len();
+        let mut right = intervals.len() - 1;
         let mut left = 0;
-        let mut mid = right / 2;
 
         if intervals[right - 1].start < stop {
             // last start pos is less than the stop, then return the last pos
@@ -114,14 +121,15 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
             // first start pos > stop, not in this cluster at all
             return None;
         }
-        while left < right {
-            match stop.cmp(&intervals[mid].start) {
-                Less => right = mid - 1,
-                Equal | Greater => left = mid + 1,
-            };
-            mid = (right + left) / 2;
-        }
 
+        while left < right - 1 {
+            let mid = (left + right) / 2;
+            if intervals[mid].start >= stop {
+                right = mid - 1;
+            } else {
+                left = mid;
+            }
+        }
         if intervals[right].start < stop {
             Some(right)
         } else if intervals[left].start < stop {
