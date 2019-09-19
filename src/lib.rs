@@ -32,26 +32,76 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
         min_cov_len: Option<usize>,
         max_lin_search: Option<usize>,
     ) -> Self {
+        // Configs
         let min_cov_len = min_cov_len.unwrap_or(20);
+        //let max_comps = (intervals_labels.len() as f64).sqrt() as u32;
+        let max_comps = 10;
         let max_lin_search = max_lin_search.unwrap_or(15);
+        let min_elements = std::cmp::max(64, min_cov_len);
+
         intervals_labels.sort_by(|a, b| a.0.cmp(&b.0)); // sort by start site
 
         let mut headers = vec![];
         let mut intervals = Vec::with_capacity(intervals_labels.len());
         // Decompose long intervals
         let mut header_start = 0;
-        while intervals_labels.len() > 0 {
-            let (list_1, list_2) = Self::decompose(intervals_labels, min_cov_len);
-            intervals.extend(list_1);
+        let mut num_comps = 0;
+        let cov_depth = min_cov_len / 2;
+        while intervals_labels.len() > min_elements && num_comps < max_comps {
+            //let (list_1, list_2) = Self::decompose(intervals_labels, min_cov_len);
+            let mut list_1 = vec![];
+            let mut list_2 = vec![];
+
+            let mut max_covered = 0;
+            for i in 0..intervals_labels.len() {
+                let interval = intervals_labels[i].0;
+                let mut covered = 0;
+                let mut j = i;
+                let j_end = std::cmp::min(i + min_cov_len, intervals_labels.len());
+                while j < j_end && covered < cov_depth {
+                    if interval.start < intervals_labels[j].0.stop {
+                        covered += 1;
+                    }
+                    j += 1;
+                }
+
+                if covered > max_covered {
+                    max_covered = covered;
+                }
+                // check if list[i] covers more than the min coverage
+                if covered >= cov_depth {
+                    list_2.push(intervals_labels[i].clone());
+                } else {
+                    list_1.push(intervals_labels[i].clone());
+                }
+            }
+            // Add the running max to list_1 since that one will be sticking around
+            if list_1.len() > 0 {
+                Self::add_running_max(&mut list_1);
+                intervals.extend(list_1);
+                headers.push(Header {
+                    start: header_start,
+                    stop: intervals.len(),
+                });
+                header_start = intervals.len();
+                intervals_labels = list_2;
+                num_comps += 1;
+            } else {
+                break; // there are no more issues!
+            }
+        }
+
+        if intervals_labels.len() != 0 {
+            Self::add_running_max(&mut intervals_labels);
+            intervals.extend(intervals_labels);
             headers.push(Header {
                 start: header_start,
                 stop: intervals.len(),
             });
-            header_start = intervals.len();
-            intervals_labels = list_2;
         }
 
         let (intervals, labels): (Vec<Interval>, Vec<T>) = intervals.into_iter().unzip();
+        println!("Constructed with {} sublists", headers.len());
         AIList {
             intervals,
             labels,
@@ -65,35 +115,38 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
         list: Vec<(Interval, T)>,
         min_cov_len: usize,
     ) -> (Vec<(Interval, T)>, Vec<(Interval, T)>) {
+        println!("Decompose called");
         let mut list_1 = vec![];
         let mut list_2 = vec![];
+        let cov_len_1 = min_cov_len / 2;
 
+        let mut max_covered = 0;
         for i in 0..list.len() {
             let interval = list[i].0;
             let mut covered = 0;
             let mut j = i;
-            let j_end = std::cmp::min(i + (2 * min_cov_len), list.len());
-            while j < j_end && interval.stop < list[j].0.start {
+            let j_end = std::cmp::min(i + min_cov_len, list.len());
+            while j < j_end && covered < cov_len_1 {
                 if interval.start < list[j].0.stop {
                     covered += 1;
                 }
                 j += 1;
             }
-            //for j in i..std::cmp::min(i + (2 * min_cov_len), list.len()) {
-            //if interval.overlap(list[j].0.start, list[j].0.stop) {
-            //covered += 1;
-            //}
-            //}
+
+            if covered > max_covered {
+                max_covered = covered;
+            }
             // check if list[i] covers more than the min coverage
-            if covered > min_cov_len {
+            if covered >= cov_len_1 {
                 list_2.push(list[i].clone());
             } else {
                 list_1.push(list[i].clone());
             }
         }
         // Add the running max to list_1 since that one will be sticking around
+        println!("Adding running max");
         Self::add_running_max(&mut list_1);
-
+        println!("{:#?}", list_1);
         (list_1, list_2)
     }
 
@@ -299,7 +352,7 @@ mod tests {
                 max_end: 0,
             }, 0))
             .collect();
-        let ailist= AIList::new(data, Some(3), Some(5));
+        let ailist= AIList::new(data, Some(2), Some(2));
        ailist 
     }
     fn setup_overlapping() -> AIList<u32> {
@@ -435,5 +488,37 @@ mod tests {
             //vec![&e1, &e2],
             //lapper.seek(8, 20, &mut cursor).collect::<Vec<&Iv>>()
         //);
+    }
+
+    // Bug tests
+    // Test that if lower_bound puts us before the first match, we still return a match
+    #[test]
+    fn test_find_over_behind_first_match() {
+        let lapper = setup_badlapper();
+        let e1 = (&Iv {start: 50, stop: 55, max_end: 0}, &0);
+        let found = lapper.find(50, 55).next();
+        assert_eq!(found, Some(e1));
+    }
+
+    // When there is a very long interval that spans many little intervals, test that the little
+    // intevals still get returne properly
+    #[test]
+    fn test_bad_skips() {
+        let data = vec![
+            (Iv{start:25264912, stop: 25264986, max_end: 0}, 0),	
+            (Iv{start:27273024, stop: 27273065	, max_end: 0}, 0),
+            (Iv{start:27440273, stop: 27440318	, max_end: 0}, 0),
+            (Iv{start:27488033, stop: 27488125	, max_end: 0}, 0),
+            (Iv{start:27938410, stop: 27938470	, max_end: 0}, 0),
+            (Iv{start:27959118, stop: 27959171	, max_end: 0}, 0),
+            (Iv{start:28866309, stop: 33141404	, max_end: 0}, 0),
+        ];
+        let lapper = AIList::new(data, Some(2), Some(2));
+        println!("{:#?}", lapper);
+
+        let found = lapper.find(28974798, 33141355).collect::<Vec<(&Iv, &u32)>>();
+        assert_eq!(found, vec![
+            (&Iv{start:28866309, stop: 33141404	, max_end: 0}, &0)]);
+
     }
 }
