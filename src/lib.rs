@@ -10,7 +10,7 @@
 //!
 //! Please see the [paper](https://www.biorxiv.org/content/10.1101/593657v1).
 //!
-//! Most interaction with this crate will be through the [`ScAIList``](struct.ScAIList.html)` struct
+//! Most interaction with this crate will be through the [`ScAIList`](struct.ScAIList.html)` struct
 //! The main methods is [`find`](struct.Lapper.html#method.find).
 //!
 //! The overlap function for this assumes a zero based genomic coordinate system. So [start, stop)
