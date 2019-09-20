@@ -1,4 +1,59 @@
+//! This module provides an implementation of an AIList, but with a dynamic scaling for the number
+//! of sublists.
+//! ## Features
+//! - Extremely consistant. The way the input intervals are decomposed diminishes the effects of
+//! super containment.
+//! - Parallel friendly. Queries are on an immutable structure, even for seek
+//! - Consumer / Adapter paradigm, an iterator is returned.
+//!
+//! ## Details:
+//!
+//! Please see the [paper](https://www.biorxiv.org/content/10.1101/593657v1).
+//!
+//! Most interaction with this crate will be through the [`ScAIList``](struct.ScAIList.html)` struct
+//! The main methods is [`find`](struct.Lapper.html#method.find).
+//!
+//! The overlap function for this assumes a zero based genomic coordinate system. So [start, stop)
+//! is not inclusive of the stop position for neither the queries, nor the Intervals.
+//!
+//! ScAIList is composed of four primary parts. A main interval list, which holds all the
+//! intervals after they have been decomposed. A component index's list, which holds the start
+//! index of each sublist post-decomposition, A component lengths list, which holds the length of
+//! each component, and finally a max_ends list, which holds the max end releative to a sublist up
+//! to a given point for each interval.
+//!
+//! The decomposition step is achieved by walking the list of intervals and recursively (with a
+//! cap) extracting intervals that overlap a given number of other intervals within a certain
+//! distance from it. The unique development in this implementation is to make the cap dynamic.
+//!
+//! # Examples
+//!
+//! ```rust
+//!    use scailist::{Interval, ScAIList};
+//!    use std::cmp;
+//!    type Iv = Interval<u32>;
+//!
+//!    // create some fake data
+//!    let data: Vec<Iv> = (0..20).step_by(5).map(|x| Iv{start: x, end: x + 2, val: 0}).collect();
+//!    println!("{:#?}", data);
+//!
+//!    // make lapper structure
+//!    let laps = ScAIList::new(data, None);
+//!    assert_eq!(laps.find(6, 11).next(), Some(&Iv{start: 5, end: 7, val: 0}));
+//!    
+//!    let mut sim: u32= 0;
+//!    // Calculate the overlap between the query and the found intervals, sum total overlap
+//!    for i in (0..10).step_by(3) {
+//!        sim += laps
+//!            .find(i, i + 2)
+//!            .map(|iv| cmp::min(i + 2, iv.end) - cmp::max(i, iv.start))
+//!            .sum::<u32>();
+//!    }
+//!    assert_eq!(sim, 4);
+//! ```
 use std::cmp::Ordering;
+
+/// This is the main object of this repo, see associated methods
 #[derive(Debug)]
 pub struct ScAIList<T: Clone + Eq + std::fmt::Debug> {
     /// The list of intervals
@@ -21,8 +76,14 @@ pub struct Interval<T: Clone + Eq + std::fmt::Debug> {
     pub val: T,
 }
 
+/// The ScAIList itself
 impl<T: Clone + Eq + std::fmt::Debug> ScAIList<T> {
-    /// Create a new ScAIList out of the passed in intervals. the `min_cov_len`
+    /// Create a new ScAIList out of the passed in intervals. The min_cov_len should probably be
+    /// left as default, which is 20. It dictates how far ahead to look from a given point to
+    /// determine if that interval covers enough other intervals to be moved to a sublist. The
+    /// number of intervals it has to cover is equal to min_cov_len / 2. The number of sublists
+    /// that might be fored is capped at intervals.len().log2(), but if there aren't many overlaps,
+    /// fewer will be created.
     pub fn new(mut input_intervals: Vec<Interval<T>>, min_cov_len: Option<usize>) -> Self {
         let max_comps = (input_intervals.len() as f64).log2().floor() as usize + 1;
         let min_cov_len = min_cov_len.unwrap_or(20); // number of elements ahead to check for cov
