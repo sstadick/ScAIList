@@ -3,6 +3,13 @@ name = "ailist"
 version = "0.1.0"
 authors = ["Seth Stadick <sstadick@gmail.com>"]
 edition = "2018"
+license = "MIT"
+repository = "https://github.com/sstadick/AIList"
+description = "A fast and easy interval overlap library"
+documentation = "https://docs.rs/rust-lapper"
+readme = "README.md"
+categories = ["algorithms", "science"]
+keywords = ["tree", "interval", "bioinformatics", "ranges", "genomic"]
 
 [dependencies]
 
