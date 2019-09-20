@@ -1,194 +1,146 @@
 use std::cmp::Ordering::{self, Equal, Greater, Less};
 #[derive(Debug)]
-pub struct AIList<T> {
+pub struct AIList<T: Clone + Eq + std::fmt::Debug> {
     /// The list of intervals
-    intervals: Vec<Interval>,
-    /// The labels that map to each interval
-    labels: Vec<T>,
-    /// List of starts of sublists
-    headers: Vec<Header>,
-    /// The max number of items to just do a linear search on
-    max_lin_search: usize,
+    intervals: Vec<Interval<T>>,
+    // number of comps total
+    num_comps: usize,
+    // list of lengths of comps
+    comp_lens: Vec<usize>,
+    // start index's of comps
+    comp_idxs: Vec<usize>,
+    // vec of max ends, pairs with intervals
+    max_ends: Vec<u32>,
 }
 
 /// Hold the start and stop of each sublist
 #[derive(Eq, Debug, Clone, Copy)]
-pub struct Interval {
+pub struct Interval<T: Clone + Eq + std::fmt::Debug> {
     pub start: u32,
-    pub stop: u32,
-    pub max_end: u32,
+    pub end: u32,
+    pub val: T,
 }
 
-#[derive(Debug)]
-struct Header {
-    start: usize,
-    stop: usize,
-}
-
-impl<T: Clone + std::fmt::Debug> AIList<T> {
+impl<T: Clone + Eq + std::fmt::Debug> AIList<T> {
     /// Create a new AIList out of the passed in intervals. the `min_cov_len`
-    pub fn new(
-        mut intervals_labels: Vec<(Interval, T)>,
-        min_cov_len: Option<usize>,
-        max_lin_search: Option<usize>,
-    ) -> Self {
-        // Configs
-        let min_cov_len = min_cov_len.unwrap_or(20);
-        //let max_comps = (intervals_labels.len() as f64).sqrt() as u32;
-        let max_comps = 10;
-        let max_lin_search = max_lin_search.unwrap_or(15);
-        let min_elements = std::cmp::max(64, min_cov_len);
+    pub fn new(mut input_intervals: Vec<Interval<T>>, min_cov_len: Option<usize>) -> Self {
+        //const MAX_COMPS: usize = 10;
+        let MAX_COMPS = (input_intervals.len() as f64).log2().floor() as usize + 1;
+        let min_cov_len = min_cov_len.unwrap_or(20); // number of elements ahead to check for cov
+        let min_cov = min_cov_len / 2; // the number of elemnts covered to trigger an extraction
 
-        intervals_labels.sort_by(|a, b| a.0.cmp(&b.0)); // sort by start site
+        let mut num_comps = 0usize; // number of components
+        let mut comp_lens = vec![]; // lengths of each component
+        let mut comp_idxs = vec![]; // start positions of each component
+        let mut max_ends = vec![]; // list of the max end positions
 
-        let mut headers = vec![];
-        let mut intervals = Vec::with_capacity(intervals_labels.len());
-        // Decompose long intervals
-        let mut header_start = 0;
-        let mut num_comps = 0;
-        let cov_depth = min_cov_len / 2;
-        while intervals_labels.len() > min_elements && num_comps < max_comps {
-            //let (list_1, list_2) = Self::decompose(intervals_labels, min_cov_len);
-            let mut list_1 = vec![];
-            let mut list_2 = vec![];
+        let min_comp_len = std::cmp::max(64, min_cov_len); // min length of a component
 
-            let mut max_covered = 0;
-            for i in 0..intervals_labels.len() {
-                let interval = intervals_labels[i].0;
-                let mut covered = 0;
-                let mut j = i;
-                let j_end = std::cmp::min(i + min_cov_len, intervals_labels.len());
-                while j < j_end && covered < cov_depth {
-                    if interval.start < intervals_labels[j].0.stop {
-                        covered += 1;
+        let input_len = input_intervals.len();
+        input_intervals.sort();
+
+        let mut decomposed = vec![];
+        if input_len <= min_comp_len {
+            num_comps = 1;
+            comp_lens.push(input_len);
+            comp_idxs.push(0);
+            decomposed.append(&mut input_intervals);
+        } else {
+            // TODO: I suspect that in here is where the decomp goes badly and we basically end up
+            // with a glorified linear search
+            let mut curr_comp = 0;
+            while curr_comp < MAX_COMPS && input_len - decomposed.len() > min_comp_len {
+                let mut list1 = vec![];
+                let mut list2 = vec![];
+                for i in 0..input_intervals.len() {
+                    let interval = &input_intervals[i];
+                    let mut j = 1;
+                    let mut cov = 1;
+                    while j < min_comp_len && cov < min_cov && j + i < input_intervals.len() {
+                        if input_intervals[j + i].end >= interval.end {
+                            cov += 1;
+                        }
+                        j += 1;
                     }
-                    j += 1;
+                    if cov < min_cov {
+                        list1.push(input_intervals[i].clone());
+                    } else {
+                        list2.push(input_intervals[i].clone())
+                    }
                 }
+                // Add the component info to AIList
+                comp_idxs.push(decomposed.len());
+                comp_lens.push(list1.len());
+                curr_comp += 1;
 
-                if covered > max_covered {
-                    max_covered = covered;
-                }
-                // check if list[i] covers more than the min coverage
-                if covered >= cov_depth {
-                    list_2.push(intervals_labels[i].clone());
+                if list2.len() <= min_comp_len || curr_comp == MAX_COMPS - 2 {
+                    // exit: add L2 to the end
+                    if list2.len() > 0 {
+                        decomposed.append(&mut list1);
+                        comp_idxs.push(decomposed.len());
+                        comp_lens.push(list2.len());
+                        decomposed.append(&mut list2);
+                        curr_comp += 1;
+                    }
                 } else {
-                    list_1.push(intervals_labels[i].clone());
+                    decomposed.append(&mut list1);
+                    input_intervals = list2;
                 }
             }
-            // Add the running max to list_1 since that one will be sticking around
-            if list_1.len() > 0 {
-                Self::add_running_max(&mut list_1);
-                intervals.extend(list_1);
-                headers.push(Header {
-                    start: header_start,
-                    stop: intervals.len(),
-                });
-                header_start = intervals.len();
-                intervals_labels = list_2;
-                num_comps += 1;
-            } else {
-                break; // there are no more issues!
+            num_comps = curr_comp;
+        }
+
+        // Augment with maxend
+        for j in 0..num_comps {
+            let comp_start = comp_idxs[j];
+            let comp_end = comp_start + comp_lens[j];
+            let mut max_end = decomposed[comp_start].end;
+            max_ends.push(max_end);
+            for i in comp_start + 1..comp_end {
+                if decomposed[i].end > max_end {
+                    max_end = decomposed[i].end;
+                }
+                max_ends.push(max_end);
             }
         }
 
-        if intervals_labels.len() != 0 {
-            Self::add_running_max(&mut intervals_labels);
-            intervals.extend(intervals_labels);
-            headers.push(Header {
-                start: header_start,
-                stop: intervals.len(),
-            });
-        }
-
-        let (intervals, labels): (Vec<Interval>, Vec<T>) = intervals.into_iter().unzip();
-        println!("Constructed with {} sublists", headers.len());
         AIList {
-            intervals,
-            labels,
-            headers,
-            max_lin_search,
-        }
-    }
-
-    #[inline]
-    fn decompose(
-        list: Vec<(Interval, T)>,
-        min_cov_len: usize,
-    ) -> (Vec<(Interval, T)>, Vec<(Interval, T)>) {
-        println!("Decompose called");
-        let mut list_1 = vec![];
-        let mut list_2 = vec![];
-        let cov_len_1 = min_cov_len / 2;
-
-        let mut max_covered = 0;
-        for i in 0..list.len() {
-            let interval = list[i].0;
-            let mut covered = 0;
-            let mut j = i;
-            let j_end = std::cmp::min(i + min_cov_len, list.len());
-            while j < j_end && covered < cov_len_1 {
-                if interval.start < list[j].0.stop {
-                    covered += 1;
-                }
-                j += 1;
-            }
-
-            if covered > max_covered {
-                max_covered = covered;
-            }
-            // check if list[i] covers more than the min coverage
-            if covered >= cov_len_1 {
-                list_2.push(list[i].clone());
-            } else {
-                list_1.push(list[i].clone());
-            }
-        }
-        // Add the running max to list_1 since that one will be sticking around
-        println!("Adding running max");
-        Self::add_running_max(&mut list_1);
-        println!("{:#?}", list_1);
-        (list_1, list_2)
-    }
-
-    #[inline]
-    fn add_running_max(list: &mut Vec<(Interval, T)>) {
-        let mut max_stop = 0;
-        for (iv, _label) in list.iter_mut() {
-            if iv.stop >= max_stop {
-                max_stop = iv.stop;
-            }
-            iv.max_end = max_stop;
+            num_comps,
+            comp_idxs,
+            comp_lens,
+            max_ends,
+            intervals: decomposed,
         }
     }
 
     /// Binary search to find the right most index where interval.start < query.stop
     #[inline]
-    pub fn upper_bound(stop: u32, intervals: &[Interval]) -> Option<usize> {
-        let mut right = intervals.len() - 1;
+    pub fn upper_bound(stop: u32, intervals: &[Interval<T>]) -> Option<usize> {
+        let mut right = intervals.len();
         let mut left = 0;
 
         if intervals[right - 1].start < stop {
             // last start pos is less than the stop, then return the last pos
-            return Some(right);
+            return Some(right - 1);
         } else if intervals[left].start >= stop {
             // first start pos > stop, not in this cluster at all
             return None;
         }
 
-        while left < right - 1 {
-            let mid = (left + right) / 2;
-            if intervals[mid].start >= stop {
-                right = mid - 1;
-            } else {
-                left = mid;
-            }
+        while right > 0 {
+            let half = right / 2;
+            let other_half = right - half;
+            let probe = left + half;
+            let other_left = left + other_half;
+            let v = &intervals[probe];
+            right = half;
+            left = if v.start < stop { other_left } else { left }
         }
-        if intervals[right].start < stop {
-            Some(right)
-        } else if intervals[left].start < stop {
-            Some(left)
+        // Guarded at the top from ending on either extreme
+        if intervals[left].start >= stop {
+            Some(left - 1)
         } else {
-            None
+            Some(left)
         }
     }
 
@@ -201,29 +153,33 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
     }
 
     #[inline]
+    // TODO: Convert to a real iterator
+    // TODO: Add seek... multiple cursors? how would that work?
     pub fn find(&self, start: u32, stop: u32) -> IterFind<T> {
         let mut result = vec![];
-        for h_idx in 0..self.headers.len() {
-            let header = &self.headers[h_idx];
-            if header.stop - header.start > 15 {
+        for comp_num in 0..self.num_comps {
+            let comp_start = self.comp_idxs[comp_num];
+            let comp_end = comp_start + self.comp_lens[comp_num];
+            if self.comp_lens[comp_num] > 15 {
                 let mut offset =
-                    match Self::upper_bound(stop, &self.intervals[header.start..header.stop]) {
+                    match Self::upper_bound(stop, &self.intervals[comp_start..comp_end]) {
                         Some(n) => n,
                         None => continue,
                     };
-                while offset >= header.start && self.intervals[offset].max_end > start {
-                    if self.intervals[offset].stop > start {
-                        result.push((&self.intervals[offset], &self.labels[offset]));
+                offset += comp_start;
+                while offset >= comp_start && self.max_ends[offset] > start {
+                    if self.intervals[offset].end > start {
+                        result.push(&self.intervals[offset]);
                     }
                     offset = match offset.checked_sub(1) {
                         Some(n) => n,
                         None => break,
-                    }
+                    };
                 }
             } else {
-                for offset in header.start..header.stop {
-                    if self.intervals[offset].start < stop && self.intervals[offset].stop > start {
-                        result.push((&self.intervals[offset], &self.labels[offset]));
+                for offset in comp_start..comp_end {
+                    if self.intervals[offset].start < stop && self.intervals[offset].end > start {
+                        result.push(&self.intervals[offset]);
                     }
                 }
             }
@@ -235,13 +191,13 @@ impl<T: Clone + std::fmt::Debug> AIList<T> {
 
 /// Find Iterator
 #[derive(Debug)]
-pub struct IterFind<'a, T> {
+pub struct IterFind<'a, T: Clone + Eq + std::fmt::Debug> {
     curr: usize,
-    result: Vec<(&'a Interval, &'a T)>,
+    result: Vec<&'a Interval<T>>,
 }
 
-impl<'a, T: Clone + std::fmt::Debug> Iterator for IterFind<'a, T> {
-    type Item = (&'a Interval, &'a T);
+impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterFind<'a, T> {
+    type Item = &'a Interval<T>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -257,83 +213,72 @@ impl<'a, T: Clone + std::fmt::Debug> Iterator for IterFind<'a, T> {
 /// AIList Iterator
 pub struct IterAIList<'a, T>
 where
-    T: Clone + std::fmt::Debug + 'a,
+    T: Clone + Eq + std::fmt::Debug + 'a,
 {
     inner: &'a AIList<T>,
     pos: usize,
 }
 
-impl<'a, T: Clone + std::fmt::Debug> Iterator for IterAIList<'a, T> {
-    type Item = (&'a Interval, &'a T);
+impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterAIList<'a, T> {
+    type Item = &'a Interval<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos >= self.inner.intervals.len() {
             None
         } else {
             self.pos += 1;
-            Some((
-                &self.inner.intervals[self.pos - 1],
-                &self.inner.labels[self.pos - 1],
-            ))
+            Some(&self.inner.intervals[self.pos - 1])
         }
     }
 }
 
-impl Interval {
-    /// Create a new interval with default max_end
-    pub fn new(start: u32, stop: u32) -> Self {
-        Interval {
-            start,
-            stop,
-            max_end: stop,
-        }
-    }
+impl<T: Clone + Eq + std::fmt::Debug> Interval<T> {
     /// Compute the intersect between two intervals
     #[inline]
-    pub fn intersect(&self, other: &Interval) -> u32 {
-        std::cmp::min(self.stop, other.stop)
+    pub fn intersect(&self, other: &Self) -> u32 {
+        std::cmp::min(self.end, other.end)
             .checked_sub(std::cmp::max(self.start, other.start))
             .unwrap_or(0)
     }
 
     /// Internal version of intersect for working with IntervalNode / Interval
-    pub fn intersect_raw(&self, start: u32, stop: u32) -> u32 {
-        std::cmp::min(self.stop, stop)
+    pub fn intersect_raw(&self, start: u32, end: u32) -> u32 {
+        std::cmp::min(self.end, end)
             .checked_sub(std::cmp::max(self.start, start))
             .unwrap_or(0)
     }
 
     /// Check if two intervals overlap
     #[inline]
-    pub fn overlap(&self, start: u32, stop: u32) -> bool {
-        self.start < stop && self.stop > start
+    pub fn overlap(&self, start: u32, end: u32) -> bool {
+        self.start < end && self.end > start
     }
 }
 
-impl Ord for Interval {
+impl<T: Clone + Eq + std::fmt::Debug> Ord for Interval<T> {
     #[inline]
-    fn cmp(&self, other: &Interval) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         if self.start < other.start {
             Ordering::Less
         } else if other.start < self.start {
             Ordering::Greater
         } else {
-            self.stop.cmp(&other.stop)
+            self.end.cmp(&other.end)
         }
     }
 }
 
-impl PartialOrd for Interval {
+impl<T: Clone + Eq + std::fmt::Debug> PartialOrd for Interval<T> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(&other))
     }
 }
 
-impl PartialEq for Interval {
+impl<T: Clone + Eq + std::fmt::Debug> PartialEq for Interval<T> {
     #[inline]
-    fn eq(&self, other: &Interval) -> bool {
-        self.start == other.start && self.stop == other.stop
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start && self.end == other.end
     }
 }
 
@@ -342,69 +287,69 @@ impl PartialEq for Interval {
 mod tests {
     use super::*;
 
-    type Iv = Interval;
+    type Iv = Interval<u32>;
     fn setup_nonoverlapping() -> AIList<u32> {
-        let data: Vec<(Iv, u32)> = (0..100)
+        let data: Vec<Iv> = (0..100)
             .step_by(20)
-            .map(|x| (Iv {
+            .map(|x| Iv {
                 start: x,
-                stop: x + 10,
-                max_end: 0,
-            }, 0))
+                end: x + 10,
+                val: 0,
+            })
             .collect();
-        let ailist= AIList::new(data, Some(2), Some(2));
-       ailist 
+        let lapper = AIList::new(data, None);
+        lapper
     }
     fn setup_overlapping() -> AIList<u32> {
-        let data: Vec<(Iv, u32)> = (0..100)
+        let data: Vec<Iv> = (0..100)
             .step_by(10)
-            .map(|x| (Iv {
+            .map(|x| Iv {
                 start: x,
-                stop: x + 15,
-                max_end: 0,
-            }, 0))
+                end: x + 15,
+                val: 0,
+            })
             .collect();
-        let ailist= AIList::new(data, Some(1), Some(5));
-       ailist 
+        let lapper = AIList::new(data, None);
+        lapper
     }
     fn setup_badlapper() -> AIList<u32> {
-        let data: Vec<(Iv, u32)> = vec![
-            (Iv{start: 70, stop: 120, max_end: 0}, 0), // max_len = 50
-            (Iv{start: 10, stop: 15, max_end: 0}, 0),
-            (Iv{start: 10, stop: 15, max_end: 0}, 0), // exact overlap
-            (Iv{start: 12, stop: 15, max_end: 0}, 0), // inner overlap
-            (Iv{start: 14, stop: 16, max_end: 0}, 0), // overlap end
-            (Iv{start: 40, stop: 45, max_end: 0}, 0),
-            (Iv{start: 50, stop: 55, max_end: 0}, 0),
-            (Iv{start: 60, stop: 65, max_end: 0}, 0),
-            (Iv{start: 68, stop: 71, max_end: 0}, 0), // overlap start
-            (Iv{start: 70, stop: 75, max_end: 0}, 0),
+        let data: Vec<Iv> = vec![
+            Iv{start: 70, end: 120, val: 0}, // max_len = 50
+            Iv{start: 10, end: 15, val: 0},
+            Iv{start: 10, end: 15, val: 0}, // exact overlap
+            Iv{start: 12, end: 15, val: 0}, // inner overlap
+            Iv{start: 14, end: 16, val: 0}, // overlap end
+            Iv{start: 40, end: 45, val: 0},
+            Iv{start: 50, end: 55, val: 0},
+            Iv{start: 60, end: 65, val: 0},
+            Iv{start: 68, end: 71, val: 0}, // overlap start
+            Iv{start: 70, end: 75, val: 0},
         ];
-        let ailist= AIList::new(data, Some(3), Some(5));
-       ailist 
+        let lapper = AIList::new(data, None);
+        lapper
     }
     fn setup_single() -> AIList<u32> {
-        let data: Vec<(Iv, u32)> = vec![(Iv {
+        let data: Vec<Iv> = vec![Iv {
             start: 10,
-            stop: 35,
-            max_end: 0,
-        }, 0)];
-        let ailist= AIList::new(data, Some(3), Some(5));
-       ailist 
+            end: 35,
+            val: 0,
+        }];
+        let lapper = AIList::new(data, None);
+        lapper
     }
 
-    // Test that a query stop that hits an interval start returns no interval
+    // Test that a query end that hits an interval start returns no interval
     #[test]
-    fn test_query_stop_interval_start() {
+    fn test_query_end_interval_start() {
         let lapper = setup_nonoverlapping();
-        //let mut cursor = 0;
+        let mut cursor = 0;
         assert_eq!(None, lapper.find(15, 20).next());
         //assert_eq!(None, lapper.seek(15, 20, &mut cursor).next())
     }
 
     // Test that a query start that hits an interval end returns no interval
     #[test]
-    fn test_query_start_interval_stop() {
+    fn test_query_start_interval_end() {
         let lapper = setup_nonoverlapping();
         //let mut cursor = 0;
         assert_eq!(None, lapper.find(30, 35).next());
@@ -416,26 +361,26 @@ mod tests {
     fn test_query_overlaps_interval_start() {
         let lapper = setup_nonoverlapping();
         //let mut cursor = 0;
-        let expected = (&Iv {
+        let expected = Iv {
             start: 20,
-            stop: 30,
-            max_end: 0,
-        }, &0);
-        assert_eq!(Some(expected), lapper.find(15, 25).next());
+            end: 30,
+            val: 0,
+        };
+        assert_eq!(Some(&expected), lapper.find(15, 25).next());
         //assert_eq!(Some(&expected), lapper.seek(15, 25, &mut cursor).next())
     }
 
-    // Test that a query that overlaps the stop of an interval returns that interval
+    // Test that a query that overlaps the end of an interval returns that interval
     #[test]
-    fn test_query_overlaps_interval_stop() {
+    fn test_query_overlaps_interval_end() {
         let lapper = setup_nonoverlapping();
         //let mut cursor = 0;
-        let expected = (&Iv {
+        let expected = Iv {
             start: 20,
-            stop: 30,
-            max_end: 0,
-        }, &0);
-        assert_eq!(Some(expected), lapper.find(25, 35).next());
+            end: 30,
+            val: 0,
+        };
+        assert_eq!(Some(&expected), lapper.find(25, 35).next());
         //assert_eq!(Some(&expected), lapper.seek(25, 35, &mut cursor).next())
     }
 
@@ -444,12 +389,12 @@ mod tests {
     fn test_interval_envelops_query() {
         let lapper = setup_nonoverlapping();
         //let mut cursor = 0;
-        let expected = (&Iv {
+        let expected = Iv {
             start: 20,
-            stop: 30,
-            max_end: 0,
-        }, &0);
-        assert_eq!(Some(expected), lapper.find(22, 27).next());
+            end: 30,
+            val: 0,
+        };
+        assert_eq!(Some(&expected), lapper.find(22, 27).next());
         //assert_eq!(Some(&expected), lapper.seek(22, 27, &mut cursor).next())
     }
 
@@ -458,12 +403,12 @@ mod tests {
     fn test_query_envolops_interval() {
         let lapper = setup_nonoverlapping();
         //let mut cursor = 0;
-        let expected = (&Iv {
+        let expected = Iv {
             start: 20,
-            stop: 30,
-            max_end: 0,
-        }, &0);
-        assert_eq!(Some(expected), lapper.find(15, 35).next());
+            end: 30,
+            val: 0,
+        };
+        assert_eq!(Some(&expected), lapper.find(15, 35).next());
         //assert_eq!(Some(&expected), lapper.seek(15, 35, &mut cursor).next())
     }
 
@@ -471,33 +416,231 @@ mod tests {
     fn test_overlapping_intervals() {
         let lapper = setup_overlapping();
         //let mut cursor = 0;
-        let e1 = (&Iv {
+        let e1 = Iv {
             start: 0,
-            stop: 15,
-            max_end: 0,
-        }, &0);
-        let e2 = (&Iv {
+            end: 15,
+            val: 0,
+        };
+        let e2 = Iv {
             start: 10,
-            stop: 25,
-            max_end: 0,
-        }, &0);
-        let mut found = lapper.find(8, 20).collect::<Vec<(&Iv,&u32)>>();
-        found.sort_by(|a, b| a.0.start.cmp(&b.0.start));
-        assert_eq!(vec![e1, e2], found);
+            end: 25,
+            val: 0,
+        };
+        assert_eq!(vec![&e1, &e2], lapper.find(8, 20).collect::<Vec<&Iv>>());
         //assert_eq!(
             //vec![&e1, &e2],
             //lapper.seek(8, 20, &mut cursor).collect::<Vec<&Iv>>()
         //);
     }
 
-    // Bug tests
+    //#[test]
+    //fn test_merge_overlaps() {
+        //let mut lapper = setup_badlapper();
+        //let expected: Vec<&Iv> = vec![
+            //&Iv{start: 10, end: 16, val: 0},
+            //&Iv{start: 40, end: 45, val: 0},
+            //&Iv{start: 50, end: 55, val: 0},
+            //&Iv{start: 60, end: 65, val: 0},
+            //&Iv{start: 68, end: 120, val: 0}, // max_len = 50
+        //];
+        //lapper.merge_overlaps();
+        //assert_eq!(expected, lapper.iter().collect::<Vec<&Iv>>())
+        
+    //}
+
+    //#[test]
+    //fn test_lapper_cov() {
+        //let mut lapper = setup_badlapper();
+        //let before = lapper.cov();
+        //lapper.merge_overlaps();
+        //let after = lapper.cov();
+        //assert_eq!(before, after);
+
+        //let mut lapper = setup_nonoverlapping();
+        //lapper.set_cov();
+        //assert_eq!(lapper.cov(), 50);
+    //}
+
+    #[test]
+    fn test_interval_intersects() {
+        let i1 = Iv{start: 70, end: 120, val: 0}; // max_len = 50
+        let i2 = Iv{start: 10, end: 15, val: 0};
+        let i3 = Iv{start: 10, end: 15, val: 0}; // exact overlap
+        let i4 = Iv{start: 12, end: 15, val: 0}; // inner overlap
+        let i5 = Iv{start: 14, end: 16, val: 0}; // overlap end
+        let i6 = Iv{start: 40, end: 50, val: 0};
+        let i7 = Iv{start: 50, end: 55, val: 0};
+        let i_8 = Iv{start: 60, end: 65, val: 0};
+        let i9 = Iv{start: 68, end: 71, val: 0}; // overlap start
+        let i10 = Iv{start: 70, end: 75, val: 0};
+
+        assert_eq!(i2.intersect(&i3), 5); // exact match
+        assert_eq!(i2.intersect(&i4), 3); // inner intersect
+        assert_eq!(i2.intersect(&i5), 1); // end intersect
+        assert_eq!(i9.intersect(&i10), 1); // start intersect
+        assert_eq!(i7.intersect(&i_8), 0); // no intersect
+        assert_eq!(i6.intersect(&i7), 0); // no intersect end = start
+        assert_eq!(i1.intersect(&i10), 5); // inner intersect at start
+    }
+
+    //#[test]
+    //fn test_union_and_intersect() {
+        //let data1: Vec<Iv> = vec![
+            //Iv{start: 70, end: 120, val: 0}, // max_len = 50
+            //Iv{start: 10, end: 15, val: 0}, // exact overlap
+            //Iv{start: 12, end: 15, val: 0}, // inner overlap
+            //Iv{start: 14, end: 16, val: 0}, // overlap end
+            //Iv{start: 68, end: 71, val: 0}, // overlap start
+        //];
+        //let data2: Vec<Iv> = vec![
+
+            //Iv{start: 10, end: 15, val: 0},
+            //Iv{start: 40, end: 45, val: 0},
+            //Iv{start: 50, end: 55, val: 0},
+            //Iv{start: 60, end: 65, val: 0},
+            //Iv{start: 70, end: 75, val: 0},
+        //];
+        
+        //let (mut lapper1, mut lapper2) = (AIList::new(data1), AIList::new(data2)) ;
+        //// Should be the same either way it's calculated
+        //let (union, intersect) = lapper1.union_and_intersect(&lapper2);
+        //assert_eq!(intersect, 10);
+        //assert_eq!(union, 73);
+        //let (union, intersect) = lapper2.union_and_intersect(&lapper1);
+        //assert_eq!(intersect, 10);
+        //assert_eq!(union, 73);
+        //lapper1.merge_overlaps();
+        //lapper1.set_cov();
+        //lapper2.merge_overlaps();
+        //lapper2.set_cov();
+
+        //// Should be the same either way it's calculated
+        //let (union, intersect) = lapper1.union_and_intersect(&lapper2);
+        //assert_eq!(intersect, 10);
+        //assert_eq!(union, 73);
+        //let (union, intersect) = lapper2.union_and_intersect(&lapper1);
+        //assert_eq!(intersect, 10);
+        //assert_eq!(union, 73);
+    //}
+
+    #[test]
+    fn test_find_overlaps_in_large_intervals() {
+        let data1: Vec<Iv> = vec![
+            Iv{start: 0, end: 8, val: 0},
+            Iv{start: 1, end: 10, val: 0}, 
+            Iv{start: 2, end: 5, val: 0}, 
+            Iv{start: 3, end: 8, val: 0},
+            Iv{start: 4, end: 7, val: 0},
+            Iv{start: 5, end: 8, val: 0},
+            Iv{start: 8, end: 8, val: 0},
+            Iv{start: 9, end: 11, val: 0},
+            Iv{start: 10, end: 13, val: 0},
+            Iv{start: 100, end: 200, val: 0},
+            Iv{start: 110, end: 120, val: 0},
+            Iv{start: 110, end: 124, val: 0},
+            Iv{start: 111, end: 160, val: 0},
+            Iv{start: 150, end: 200, val: 0},
+        ];
+        let lapper = AIList::new(data1, None);
+        let found = lapper.find(8, 11).collect::<Vec<&Iv>>();
+        assert_eq!(found, vec![
+            &Iv{start: 1, end: 10, val: 0}, 
+            &Iv{start: 9, end: 11, val: 0},
+            &Iv{start: 10, end: 13, val: 0},
+        ]);
+        let found = lapper.find(145, 151).collect::<Vec<&Iv>>();
+        assert_eq!(found, vec![
+            &Iv{start: 100, end: 200, val: 0},
+            &Iv{start: 111, end: 160, val: 0},
+            &Iv{start: 150, end: 200, val: 0},
+        ]);
+
+    }
+
+    //#[test]
+    //fn test_depth_sanity() {
+        //let data1: Vec<Iv> = vec![
+            //Iv{start: 0, end: 10, val: 0},
+            //Iv{start: 5, end: 10, val: 0}
+        //];
+        //let lapper = AIList::new(data1);
+        //let found = lapper.depth().collect::<Vec<Interval<u32>>>();
+        //assert_eq!(found, vec![
+                   //Interval{start: 0, end: 5, val: 1},
+                   //Interval{start: 5, end: 10, val: 2}
+        //]);
+    //}
+
+    //#[test]
+    //fn test_depth_hard() {
+        //let data1: Vec<Iv> = vec![
+            //Iv{start: 1, end: 10, val: 0},
+            //Iv{start: 2, end: 5, val: 0},
+            //Iv{start: 3, end: 8, val: 0},
+            //Iv{start: 3, end: 8, val: 0},
+            //Iv{start: 3, end: 8, val: 0},
+            //Iv{start: 5, end: 8, val: 0},
+            //Iv{start: 9, end: 11, val: 0},
+        //];
+        //let lapper = AIList::new(data1);
+        //let found = lapper.depth().collect::<Vec<Interval<u32>>>();
+        //assert_eq!(found, vec![
+                   //Interval{start: 1, end: 2, val: 1},
+                   //Interval{start: 2, end: 3, val: 2},
+                   //Interval{start: 3, end: 8, val: 5},
+                   //Interval{start: 8, end: 9, val: 1},
+                   //Interval{start: 9, end: 10, val: 2},
+                   //Interval{start: 10, end: 11, val: 1},
+        //]);
+    //}
+    //#[test]
+    //fn test_depth_harder() {
+        //let data1: Vec<Iv> = vec![
+            //Iv{start: 1, end: 10, val: 0},
+            //Iv{start: 2, end: 5, val: 0},
+            //Iv{start: 3, end: 8, val: 0},
+            //Iv{start: 3, end: 8, val: 0},
+            //Iv{start: 3, end: 8, val: 0},
+            //Iv{start: 5, end: 8, val: 0},
+            //Iv{start: 9, end: 11, val: 0},
+            //Iv{start: 15, end: 20, val: 0},
+        //];
+        //let lapper = AIList::new(data1);
+        //let found = lapper.depth().collect::<Vec<Interval<u32>>>();
+        //assert_eq!(found, vec![
+                   //Interval{start: 1, end: 2, val: 1},
+                   //Interval{start: 2, end: 3, val: 2},
+                   //Interval{start: 3, end: 8, val: 5},
+                   //Interval{start: 8, end: 9, val: 1},
+                   //Interval{start: 9, end: 10, val: 2},
+                   //Interval{start: 10, end: 11, val: 1},
+                   //Interval{start: 15, end: 20, val: 1},
+        //]);
+    //}
+    // BUG TESTS - these are tests that came from real life
+
+    // Test that it's not possible to induce index out of bounds by pushing the cursor past the end
+    // of the lapper.
+    //#[test]
+    //fn test_seek_over_len() {
+        //let lapper = setup_nonoverlapping();
+        //let single = setup_single();
+        //let mut cursor: usize = 0;
+
+        //for interval in lapper.iter() {
+            //for o_interval in single.seek(interval.start, interval.end, &mut cursor) {
+                //println!("{:#?}", o_interval);
+            //}
+        //}
+    //}
+
     // Test that if lower_bound puts us before the first match, we still return a match
     #[test]
     fn test_find_over_behind_first_match() {
         let lapper = setup_badlapper();
-        let e1 = (&Iv {start: 50, stop: 55, max_end: 0}, &0);
+        let e1 = Iv {start: 50, end: 55, val: 0};
         let found = lapper.find(50, 55).next();
-        assert_eq!(found, Some(e1));
+        assert_eq!(found, Some(&e1));
     }
 
     // When there is a very long interval that spans many little intervals, test that the little
@@ -505,20 +648,20 @@ mod tests {
     #[test]
     fn test_bad_skips() {
         let data = vec![
-            (Iv{start:25264912, stop: 25264986, max_end: 0}, 0),	
-            (Iv{start:27273024, stop: 27273065	, max_end: 0}, 0),
-            (Iv{start:27440273, stop: 27440318	, max_end: 0}, 0),
-            (Iv{start:27488033, stop: 27488125	, max_end: 0}, 0),
-            (Iv{start:27938410, stop: 27938470	, max_end: 0}, 0),
-            (Iv{start:27959118, stop: 27959171	, max_end: 0}, 0),
-            (Iv{start:28866309, stop: 33141404	, max_end: 0}, 0),
+            Iv{start:25264912, end: 25264986, val: 0},	
+            Iv{start:27273024, end: 27273065	, val: 0},
+            Iv{start:27440273, end: 27440318	, val: 0},
+            Iv{start:27488033, end: 27488125	, val: 0},
+            Iv{start:27938410, end: 27938470	, val: 0},
+            Iv{start:27959118, end: 27959171	, val: 0},
+            Iv{start:28866309, end: 33141404	, val: 0},
         ];
-        let lapper = AIList::new(data, Some(2), Some(2));
-        println!("{:#?}", lapper);
+        let lapper = AIList::new(data, None);
 
-        let found = lapper.find(28974798, 33141355).collect::<Vec<(&Iv, &u32)>>();
+        let found = lapper.find(28974798, 33141355).collect::<Vec<&Iv>>();
         assert_eq!(found, vec![
-            (&Iv{start:28866309, stop: 33141404	, max_end: 0}, &0)]);
+            &Iv{start:28866309, end: 33141404	, val: 0},
+        ])
 
     }
 }
