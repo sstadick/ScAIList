@@ -106,8 +106,6 @@ impl<T: Clone + Eq + std::fmt::Debug> ScAIList<T> {
             comp_idxs.push(0);
             decomposed.append(&mut input_intervals);
         } else {
-            // TODO: I suspect that in here is where the decomp goes badly and we basically end up
-            // with a glorified linear search
             let mut curr_comp = 0;
             while curr_comp < max_comps && input_len - decomposed.len() > min_comp_len {
                 let mut list1 = vec![];
@@ -135,7 +133,7 @@ impl<T: Clone + Eq + std::fmt::Debug> ScAIList<T> {
 
                 if list2.len() <= min_comp_len || curr_comp == max_comps - 2 {
                     // exit: add L2 to the end
-                    if list2.is_empty() {
+                    if !list2.is_empty() {
                         decomposed.append(&mut list1);
                         comp_idxs.push(decomposed.len());
                         comp_lens.push(list2.len());
