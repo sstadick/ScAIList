@@ -1,12 +1,12 @@
 [package]
 name = "scailist"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Seth Stadick <sstadick@gmail.com>"]
 edition = "2018"
 license = "MIT"
-repository = "https://github.com/sstadick/AIList"
+repository = "https://github.com/sstadick/ScAIList"
 description = "A fast and easy interval overlap library"
-documentation = "https://docs.rs/rust-lapper"
+documentation = "https://docs.rs/scailist"
 readme = "README.md"
 categories = ["algorithms", "science"]
 keywords = ["tree", "interval", "bioinformatics", "ranges", "genomic"]
