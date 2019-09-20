@@ -1,6 +1,6 @@
-use std::cmp::Ordering::{self, Equal, Greater, Less};
+use std::cmp::Ordering;
 #[derive(Debug)]
-pub struct AIList<T: Clone + Eq + std::fmt::Debug> {
+pub struct ScAIList<T: Clone + Eq + std::fmt::Debug> {
     /// The list of intervals
     intervals: Vec<Interval<T>>,
     // number of comps total
@@ -21,15 +21,14 @@ pub struct Interval<T: Clone + Eq + std::fmt::Debug> {
     pub val: T,
 }
 
-impl<T: Clone + Eq + std::fmt::Debug> AIList<T> {
-    /// Create a new AIList out of the passed in intervals. the `min_cov_len`
+impl<T: Clone + Eq + std::fmt::Debug> ScAIList<T> {
+    /// Create a new ScAIList out of the passed in intervals. the `min_cov_len`
     pub fn new(mut input_intervals: Vec<Interval<T>>, min_cov_len: Option<usize>) -> Self {
-        //const MAX_COMPS: usize = 10;
-        let MAX_COMPS = (input_intervals.len() as f64).log2().floor() as usize + 1;
+        let max_comps = (input_intervals.len() as f64).log2().floor() as usize + 1;
         let min_cov_len = min_cov_len.unwrap_or(20); // number of elements ahead to check for cov
         let min_cov = min_cov_len / 2; // the number of elemnts covered to trigger an extraction
 
-        let mut num_comps = 0usize; // number of components
+        let num_comps; // number of components
         let mut comp_lens = vec![]; // lengths of each component
         let mut comp_idxs = vec![]; // start positions of each component
         let mut max_ends = vec![]; // list of the max end positions
@@ -49,7 +48,7 @@ impl<T: Clone + Eq + std::fmt::Debug> AIList<T> {
             // TODO: I suspect that in here is where the decomp goes badly and we basically end up
             // with a glorified linear search
             let mut curr_comp = 0;
-            while curr_comp < MAX_COMPS && input_len - decomposed.len() > min_comp_len {
+            while curr_comp < max_comps && input_len - decomposed.len() > min_comp_len {
                 let mut list1 = vec![];
                 let mut list2 = vec![];
                 for i in 0..input_intervals.len() {
@@ -68,14 +67,14 @@ impl<T: Clone + Eq + std::fmt::Debug> AIList<T> {
                         list2.push(input_intervals[i].clone())
                     }
                 }
-                // Add the component info to AIList
+                // Add the component info to ScAIList
                 comp_idxs.push(decomposed.len());
                 comp_lens.push(list1.len());
                 curr_comp += 1;
 
-                if list2.len() <= min_comp_len || curr_comp == MAX_COMPS - 2 {
+                if list2.len() <= min_comp_len || curr_comp == max_comps - 2 {
                     // exit: add L2 to the end
-                    if list2.len() > 0 {
+                    if list2.is_empty() {
                         decomposed.append(&mut list1);
                         comp_idxs.push(decomposed.len());
                         comp_lens.push(list2.len());
@@ -96,15 +95,15 @@ impl<T: Clone + Eq + std::fmt::Debug> AIList<T> {
             let comp_end = comp_start + comp_lens[j];
             let mut max_end = decomposed[comp_start].end;
             max_ends.push(max_end);
-            for i in comp_start + 1..comp_end {
-                if decomposed[i].end > max_end {
-                    max_end = decomposed[i].end;
+            for iv in decomposed[comp_start + 1..comp_end].iter() {
+                if iv.end > max_end {
+                    max_end = iv.end;
                 }
                 max_ends.push(max_end);
             }
         }
 
-        AIList {
+        ScAIList {
             num_comps,
             comp_idxs,
             comp_lens,
@@ -145,8 +144,8 @@ impl<T: Clone + Eq + std::fmt::Debug> AIList<T> {
     }
 
     #[inline]
-    pub fn iter(&self) -> IterAIList<T> {
-        IterAIList {
+    pub fn iter(&self) -> IterScAIList<T> {
+        IterScAIList {
             inner: self,
             pos: 0,
         }
@@ -203,23 +202,23 @@ impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterFind<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.curr < self.result.len() {
             self.curr += 1;
-            return Some(self.result[self.curr - 1]);
+            Some(self.result[self.curr - 1])
         } else {
-            return None;
+            None
         }
     }
 }
 
-/// AIList Iterator
-pub struct IterAIList<'a, T>
+/// ScAIList Iterator
+pub struct IterScAIList<'a, T>
 where
     T: Clone + Eq + std::fmt::Debug + 'a,
 {
-    inner: &'a AIList<T>,
+    inner: &'a ScAIList<T>,
     pos: usize,
 }
 
-impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterAIList<'a, T> {
+impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterScAIList<'a, T> {
     type Item = &'a Interval<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -288,7 +287,7 @@ mod tests {
     use super::*;
 
     type Iv = Interval<u32>;
-    fn setup_nonoverlapping() -> AIList<u32> {
+    fn setup_nonoverlapping() -> ScAIList<u32> {
         let data: Vec<Iv> = (0..100)
             .step_by(20)
             .map(|x| Iv {
@@ -297,10 +296,10 @@ mod tests {
                 val: 0,
             })
             .collect();
-        let lapper = AIList::new(data, None);
+        let lapper = ScAIList::new(data, None);
         lapper
     }
-    fn setup_overlapping() -> AIList<u32> {
+    fn setup_overlapping() -> ScAIList<u32> {
         let data: Vec<Iv> = (0..100)
             .step_by(10)
             .map(|x| Iv {
@@ -309,10 +308,10 @@ mod tests {
                 val: 0,
             })
             .collect();
-        let lapper = AIList::new(data, None);
+        let lapper = ScAIList::new(data, None);
         lapper
     }
-    fn setup_badlapper() -> AIList<u32> {
+    fn setup_badlapper() -> ScAIList<u32> {
         let data: Vec<Iv> = vec![
             Iv{start: 70, end: 120, val: 0}, // max_len = 50
             Iv{start: 10, end: 15, val: 0},
@@ -325,16 +324,16 @@ mod tests {
             Iv{start: 68, end: 71, val: 0}, // overlap start
             Iv{start: 70, end: 75, val: 0},
         ];
-        let lapper = AIList::new(data, None);
+        let lapper = ScAIList::new(data, None);
         lapper
     }
-    fn setup_single() -> AIList<u32> {
+    fn setup_single() -> ScAIList<u32> {
         let data: Vec<Iv> = vec![Iv {
             start: 10,
             end: 35,
             val: 0,
         }];
-        let lapper = AIList::new(data, None);
+        let lapper = ScAIList::new(data, None);
         lapper
     }
 
@@ -501,7 +500,7 @@ mod tests {
             //Iv{start: 70, end: 75, val: 0},
         //];
         
-        //let (mut lapper1, mut lapper2) = (AIList::new(data1), AIList::new(data2)) ;
+        //let (mut lapper1, mut lapper2) = (ScAIList::new(data1), ScAIList::new(data2)) ;
         //// Should be the same either way it's calculated
         //let (union, intersect) = lapper1.union_and_intersect(&lapper2);
         //assert_eq!(intersect, 10);
@@ -541,7 +540,7 @@ mod tests {
             Iv{start: 111, end: 160, val: 0},
             Iv{start: 150, end: 200, val: 0},
         ];
-        let lapper = AIList::new(data1, None);
+        let lapper = ScAIList::new(data1, None);
         let found = lapper.find(8, 11).collect::<Vec<&Iv>>();
         assert_eq!(found, vec![
             &Iv{start: 1, end: 10, val: 0}, 
@@ -563,7 +562,7 @@ mod tests {
             //Iv{start: 0, end: 10, val: 0},
             //Iv{start: 5, end: 10, val: 0}
         //];
-        //let lapper = AIList::new(data1);
+        //let lapper = ScAIList::new(data1);
         //let found = lapper.depth().collect::<Vec<Interval<u32>>>();
         //assert_eq!(found, vec![
                    //Interval{start: 0, end: 5, val: 1},
@@ -582,7 +581,7 @@ mod tests {
             //Iv{start: 5, end: 8, val: 0},
             //Iv{start: 9, end: 11, val: 0},
         //];
-        //let lapper = AIList::new(data1);
+        //let lapper = ScAIList::new(data1);
         //let found = lapper.depth().collect::<Vec<Interval<u32>>>();
         //assert_eq!(found, vec![
                    //Interval{start: 1, end: 2, val: 1},
@@ -605,7 +604,7 @@ mod tests {
             //Iv{start: 9, end: 11, val: 0},
             //Iv{start: 15, end: 20, val: 0},
         //];
-        //let lapper = AIList::new(data1);
+        //let lapper = ScAIList::new(data1);
         //let found = lapper.depth().collect::<Vec<Interval<u32>>>();
         //assert_eq!(found, vec![
                    //Interval{start: 1, end: 2, val: 1},
@@ -656,7 +655,7 @@ mod tests {
             Iv{start:27959118, end: 27959171	, val: 0},
             Iv{start:28866309, end: 33141404	, val: 0},
         ];
-        let lapper = AIList::new(data, None);
+        let lapper = ScAIList::new(data, None);
 
         let found = lapper.find(28974798, 33141355).collect::<Vec<&Iv>>();
         assert_eq!(found, vec![
