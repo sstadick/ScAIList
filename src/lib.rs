@@ -1,7 +1,7 @@
 //! This module provides an implementation of an AIList, but with a dynamic scaling for the number
 //! of sublists.
 //! ## Features
-//! - Extremely consistant. The way the input intervals are decomposed diminishes the effects of
+//! - Consistantly fast. The way the input intervals are decomposed diminishes the effects of
 //! super containment.
 //! - Parallel friendly. Queries are on an immutable structure, even for seek
 //! - Consumer / Adapter paradigm, an iterator is returned.
@@ -211,47 +211,30 @@ impl<T: Clone + Eq + std::fmt::Debug> ScAIList<T> {
     }
 
     #[inline]
-    // TODO: Convert to a real iterator
     // TODO: Add seek... multiple cursors? how would that work?
     pub fn find(&self, start: u32, stop: u32) -> IterFind<T> {
-        let mut result = vec![];
-        for comp_num in 0..self.num_comps {
-            let comp_start = self.comp_idxs[comp_num];
-            let comp_end = comp_start + self.comp_lens[comp_num];
-            if self.comp_lens[comp_num] > 15 {
-                let mut offset =
-                    match Self::upper_bound(stop, &self.intervals[comp_start..comp_end]) {
-                        Some(n) => n,
-                        None => continue,
-                    };
-                offset += comp_start;
-                while offset >= comp_start && self.max_ends[offset] > start {
-                    if self.intervals[offset].end > start {
-                        result.push(&self.intervals[offset]);
-                    }
-                    offset = match offset.checked_sub(1) {
-                        Some(n) => n,
-                        None => break,
-                    };
-                }
-            } else {
-                for offset in comp_start..comp_end {
-                    if self.intervals[offset].start < stop && self.intervals[offset].end > start {
-                        result.push(&self.intervals[offset]);
-                    }
-                }
-            }
+        IterFind {
+            comp_num: 0,
+            offset: 0,
+            inner: self,
+            start,
+            stop,
+            find_offset: true,
+            breaknow: false,
         }
-        // Gather a list of starting points for each header
-        IterFind { curr: 0, result }
     }
 }
 
 /// Find Iterator
 #[derive(Debug)]
 pub struct IterFind<'a, T: Clone + Eq + std::fmt::Debug> {
-    curr: usize,
-    result: Vec<&'a Interval<T>>,
+    inner: &'a ScAIList<T>,
+    offset: usize,
+    comp_num: usize,
+    stop: u32,
+    start: u32,
+    find_offset: bool,
+    breaknow: bool,
 }
 
 impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterFind<'a, T> {
@@ -259,12 +242,55 @@ impl<'a, T: Clone + Eq + std::fmt::Debug> Iterator for IterFind<'a, T> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.curr < self.result.len() {
-            self.curr += 1;
-            Some(self.result[self.curr - 1])
-        } else {
-            None
+        while self.comp_num < self.inner.num_comps {
+            let comp_start = self.inner.comp_idxs[self.comp_num];
+            let comp_end = comp_start + self.inner.comp_lens[self.comp_num];
+            if self.inner.comp_lens[self.comp_num] > 15 {
+                if self.find_offset {
+                    self.offset = match ScAIList::upper_bound(
+                        self.stop,
+                        &self.inner.intervals[comp_start..comp_end],
+                    ) {
+                        Some(n) => n,
+                        None => {
+                            self.comp_num += 1;
+                            self.find_offset = true;
+                            continue;
+                        }
+                    };
+                    self.offset += comp_start;
+                    self.find_offset = false;
+                }
+                while self.offset >= comp_start
+                    && self.inner.max_ends[self.offset] > self.start
+                    && !self.breaknow
+                {
+                    let interval = &self.inner.intervals[self.offset];
+                    self.offset = match self.offset.checked_sub(1) {
+                        Some(n) => n,
+                        None => {
+                            self.breaknow = true;
+                            0
+                        }
+                    };
+                    if interval.end > self.start {
+                        return Some(interval);
+                    }
+                }
+            } else {
+                while self.offset < comp_end {
+                    let interval = &self.inner.intervals[self.offset];
+                    self.offset += 1;
+                    if interval.start < self.stop && interval.end > self.start {
+                        return Some(interval);
+                    }
+                }
+            }
+            self.breaknow = false;
+            self.find_offset = true;
+            self.comp_num += 1;
         }
+        None
     }
 }
 
@@ -355,7 +381,7 @@ mod tests {
                 val: 0,
             })
             .collect();
-        let lapper = ScAIList::new(data, None);
+        let lapper = ScAIList::new(data, Some(4));
         lapper
     }
     fn setup_overlapping() -> ScAIList<u32> {
@@ -367,7 +393,7 @@ mod tests {
                 val: 0,
             })
             .collect();
-        let lapper = ScAIList::new(data, None);
+        let lapper = ScAIList::new(data, Some(4));
         lapper
     }
     fn setup_badlapper() -> ScAIList<u32> {
@@ -383,7 +409,7 @@ mod tests {
             Iv{start: 68, end: 71, val: 0}, // overlap start
             Iv{start: 70, end: 75, val: 0},
         ];
-        let lapper = ScAIList::new(data, None);
+        let lapper = ScAIList::new(data, Some(4));
         lapper
     }
     fn setup_single() -> ScAIList<u32> {
@@ -392,7 +418,7 @@ mod tests {
             end: 35,
             val: 0,
         }];
-        let lapper = ScAIList::new(data, None);
+        let lapper = ScAIList::new(data, Some(4));
         lapper
     }
 
@@ -599,7 +625,7 @@ mod tests {
             Iv{start: 111, end: 160, val: 0},
             Iv{start: 150, end: 200, val: 0},
         ];
-        let lapper = ScAIList::new(data1, None);
+        let lapper = ScAIList::new(data1, Some(4));
         let found = lapper.find(8, 11).collect::<Vec<&Iv>>();
         assert_eq!(found, vec![
             &Iv{start: 1, end: 10, val: 0}, 
@@ -612,6 +638,27 @@ mod tests {
             &Iv{start: 111, end: 160, val: 0},
             &Iv{start: 150, end: 200, val: 0},
         ]);
+
+    }
+
+    #[test]
+    fn test_find_overlaps_with_self() {
+        let data1: Vec<Iv> = vec![
+            Iv{start: 0, end: 8, val: 0}, // 6
+            Iv{start: 1, end: 10, val: 0},  //  7
+            Iv{start: 2, end: 5, val: 0}, // 5 
+            Iv{start: 3, end: 8, val: 0}, // 6
+            Iv{start: 4, end: 7, val: 0}, // 6
+            Iv{start: 5, end: 8, val: 0}, // 5
+            Iv{start: 9, end: 11, val: 0}, // 3
+            Iv{start: 10, end: 13, val: 0}, // 2
+        ];
+        let lapper = ScAIList::new(data1, Some(2));
+        let mut count = 0;
+        for iv in lapper.iter() {
+            count += lapper.find(iv.start, iv.end).count();
+        }
+        assert_eq!(count, 40);
 
     }
 
